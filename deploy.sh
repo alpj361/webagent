@@ -83,6 +83,15 @@ fi
 log "Construyendo imagen Docker..."
 docker compose build --no-cache
 
+# Verificar si la red de ExtractorW existe
+if docker network ls | grep -q "extractorw_extractorw-network"; then
+    log "Red de ExtractorW encontrada, usando configuración existente..."
+else
+    warn "Red de ExtractorW no encontrada, creando red local..."
+    # Cambiar temporalmente a docker-compose sin red externa
+    sed -i.bak '/networks:/,$d' docker-compose.yml
+fi
+
 # Iniciar servicios
 log "Iniciando WebAgent..."
 docker compose up -d

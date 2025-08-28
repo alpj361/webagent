@@ -15,9 +15,6 @@ services:
       - SYS_ADMIN
     security_opt:
       - seccomp=unconfined
-    # Conectar a la red de ExtractorW para comunicación interna
-    networks:
-      - extractorw_extractorw-network
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8787/health"]
       interval: 30s
@@ -29,8 +26,3 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
-# Usar la red externa de ExtractorW (que ya existe en el VPS)
-networks:
-  extractorw_extractorw-network:
-    external: true

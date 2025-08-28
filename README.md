@@ -33,13 +33,30 @@ WebAgent es un servicio inteligente de exploración web que utiliza Playwright e
    ```
 
 3. **Iniciar el servicio**:
+
+   **Con ExtractorW (Recomendado para VPS)**:
    ```bash
-   docker compose up -d
+   # WebAgent se conectará automáticamente a la red de ExtractorW
+   sudo docker compose up -d
+   ```
+
+   **Standalone (Sin ExtractorW)**:
+   ```bash
+   sudo docker compose -f docker-compose.standalone.yml up -d
+   ```
+
+   **Script automático**:
+   ```bash
+   chmod +x deploy.sh
+   ./deploy.sh
    ```
 
 4. **Verificar funcionamiento**:
    ```bash
    curl http://localhost:8787/health
+   
+   # Si tienes ExtractorW, probar integración:
+   curl http://localhost:8080/api/webagent/health
    ```
 
 ### Desarrollo Local
