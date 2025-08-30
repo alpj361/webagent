@@ -89,3 +89,4 @@ setup:
 status:
 	@echo "📊 Estado de WebAgent:"
 	@docker compose ps
+

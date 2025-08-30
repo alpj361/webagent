@@ -23,7 +23,7 @@ const AgentRequestSchema = z.object({
 type AgentRequest = z.infer<typeof AgentRequestSchema>;
 
 const PlanStepSchema = z.object({
-  action: z.enum(['click', 'type', 'extract', 'wait', 'scroll']),
+  action: z.enum(['click', 'type', 'extract', 'wait', 'scroll', 'hover']),
   selector: z.string().optional(),
   text: z.string().optional(),
   waitMs: z.number().int().min(0).max(30000).optional()
@@ -60,8 +60,35 @@ interface ExtractedContent {
   searchElements?: SearchElement[];
 }
 
+interface NavPathItem {
+  path: string; // e.g., "Menú > Submenú > Iniciativas"
+  text: string;
+  href: string;
+}
+
+interface PageScanResult {
+  headings: string[];
+  navPaths: NavPathItem[];
+  allLinks: ExtractedLink[];
+}
+
+interface CrawlFinding {
+  url: string;
+  title: string;
+  matched: string[];
+}
+
+function extractGoalTerms(goal: string): string[] {
+  return goal
+    .toLowerCase()
+    .replace(/["'.,:\-_/]/g, ' ')
+    .split(/\s+/)
+    .filter(t => t && t.length > 3 && !['necesito','buscar','busco','encontrar','quiero','ver','las','los','de','del','para','con','una','unos','unas'].includes(t))
+    .slice(0, 6);
+}
+
 async function callLLM(prompt: string, systemPrompt?: string): Promise<string> {
-  const defaultSystemPrompt = 'You are a web navigation and scraping planner. Respond with concise actions like action:click|extract|type; selector:CSS; text?:string';
+  const defaultSystemPrompt = 'You are a web navigation and scraping planner. Respond with concise actions like action:hover|click|extract|type|scroll|wait; selector:CSS; text?:string';
   const system = systemPrompt || defaultSystemPrompt;
   
   // OpenRouter
@@ -122,7 +149,7 @@ async function buildPlan(params: AgentRequest) {
       shots.push({ step: 0, path });
     }
     const html = await page.content();
-    const system = 'You are a web navigation planner. Return ONLY compact JSON matching schema {"url": string, "goal": string, "steps": [{"action":"click|type|extract|wait|scroll", "selector"?: string, "text"?: string, "waitMs"?: number}]}. Strict rules: 1) Produce 2-4 steps total when possible. 2) Prefer sequence: click/scroll/wait ... then final extract. 3) Each clickable or typable step MUST include a specific CSS selector. 4) Use wait with waitMs 800-1500 after interactions. 5) Avoid single-step extract unless the page is trivially simple. No extra text.';
+    const system = 'You are a web navigation planner. Return ONLY compact JSON matching schema {"url": string, "goal": string, "steps": [{"action":"hover|click|type|extract|wait|scroll", "selector"?: string, "text"?: string, "waitMs"?: number}]}. Strict rules: 1) Produce 2-4 steps total when possible. 2) When the target appears in a submenu, HOVER the parent menu first, then CLICK the submenu item. 3) Prefer sequence: hover/click/scroll/wait ... then final extract. 4) Each clickable/hover/typable step MUST include a specific CSS selector. 5) Use wait with waitMs 800-1500 after interactions. 6) Avoid single-step extract unless the page is trivially simple. No extra text.';
     const user = `Plan 2-4 steps to achieve the goal on this page. Prefer click/scroll/wait before a final extract.\nURL: ${params.url}\nGoal: ${params.goal}\nHTML (truncated 12k):\n${html.slice(0, 12000)}`;
     const llmResponse = await callLLM(`${system}\n${user}`);
     const cleaned = llmResponse
@@ -139,14 +166,16 @@ async function buildPlan(params: AgentRequest) {
     } catch {
       plan = { url: params.url, goal: params.goal, steps: [{ action: 'extract', selector: 'main,article' }] };
     }
-    // Heuristic expansion: if plan has < 2 steps, add a likely click + wait before extract
+    // Heuristic expansion: if plan has < 2 steps, add a likely hover + click + wait before extract
     if (plan.steps.length < 2) {
-      const clickSelector = "a[href*='contact'], a[href*='contacto'], a[href*='soporte'], a[href*='ayuda'], a[href*='servicio'], a[href*='atencion'], a[href*='agencia']";
+      const hoverSelector = "nav li:has(a), .menu li:has(a), header nav li:has(a)";
+      const clickSelector = "a[href*='iniciativa'], a[href*='iniciativas'], a[href*='ley'], a[href*='legisla'], a[href*='contact'], a[href*='contacto'], a[href*='soporte'], a[href*='ayuda']";
       const extractSelector = plan.steps.find(s => s.action === 'extract')?.selector || 'main,article,section';
       plan = {
         url: plan.url,
         goal: plan.goal,
         steps: [
+          { action: 'hover', selector: hoverSelector },
           { action: 'click', selector: clickSelector },
           { action: 'wait', waitMs: 1200 },
           { action: 'extract', selector: extractSelector }
@@ -172,8 +201,176 @@ async function runAgent(params: AgentRequest) {
   const page: Page = await browser.newPage();
   const steps: any[] = [];
   const shots: { step: number; path: string }[] = [];
+  let scan: PageScanResult | null = null;
+  const crawlFindings: CrawlFinding[] = [];
   try {
     await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    // Pre-scan: aggressively expand ALL menus and index complete structure
+    try {
+      // Step 1: Force hover on ALL potential menu triggers to reveal submenus
+      const menuTriggers = await page.$$eval('nav li, header li, .menu li, .navbar li, [role="navigation"] li, .dropdown, .nav-item', 
+        elements => elements.map(el => ({
+          selector: el.tagName.toLowerCase() + (el.id ? `#${el.id}` : '') + (el.className ? `.${el.className.replace(/\s+/g, '.')}` : ''),
+          hasChildren: el.querySelector('ul, .dropdown-menu, .submenu') !== null,
+          text: (el.textContent || '').trim().slice(0, 50)
+        }))
+      );
+      
+      // Step 2: Systematically hover each menu item to expand dropdowns
+      for (const trigger of menuTriggers) {
+        try {
+          await page.hover(trigger.selector, { timeout: 300 });
+          await page.waitForTimeout(200); // Allow dropdown to appear
+        } catch {}
+      }
+      
+      // Step 3: Also try clicking menu toggles (hamburger menus, etc)
+      const toggleSelectors = [
+        '.menu-toggle', '.nav-toggle', '.hamburger', '[aria-expanded]', 
+        'button[data-toggle]', '.dropdown-toggle', '.menu-button'
+      ];
+      for (const toggle of toggleSelectors) {
+        try {
+          await page.click(toggle, { timeout: 300 });
+          await page.waitForTimeout(300);
+        } catch {}
+      }
+      
+      await page.waitForTimeout(500); // Let all menus settle
+
+      scan = await page.evaluate((): PageScanResult => {
+        function isVisible(el: Element): boolean {
+          const style = window.getComputedStyle(el as HTMLElement);
+          return style && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+        }
+
+        const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4'))
+          .map(h => (h.textContent || '').trim())
+          .filter(Boolean)
+          .slice(0, 100);
+
+        // Enhanced navigation mapping - capture ALL menu structures
+        const navRoots = Array.from(document.querySelectorAll(
+          'nav, .nav, [role="navigation"], header, .header, .menu, .menubar, .navbar, .navigation, .main-nav, .primary-nav, .secondary-nav, .sidebar'
+        )) as HTMLElement[];
+        
+        const seen = new Set<string>();
+        const navPaths: NavPathItem[] = [];
+
+        function buildCompletePath(element: Element): string[] {
+          const path: string[] = [];
+          let current: Element | null = element;
+          let depth = 0;
+          
+          // Traverse up to build complete hierarchical path
+          while (current && depth < 8) {
+            // Look for parent menu items
+            const parentLi = current.closest('li') as HTMLLIElement | null;
+            if (parentLi && parentLi !== current) {
+              // Find the main text/link of this level
+              const levelText = parentLi.querySelector(':scope > a, :scope > span, :scope > button, :scope > .nav-link');
+              if (levelText) {
+                const text = levelText.textContent?.trim();
+                if (text && text !== (element.textContent?.trim() || '')) {
+                  path.unshift(text);
+                }
+              }
+              current = parentLi.parentElement;
+            } else {
+              // Check for other container types
+              const container = current.closest('ul, .dropdown-menu, .submenu, nav, .nav') as HTMLElement | null;
+              if (container && container !== current && container.parentElement) {
+                const containerLabel = container.parentElement.querySelector(':scope > a, :scope > span, :scope > button');
+                if (containerLabel) {
+                  const text = containerLabel.textContent?.trim();
+                  if (text && text !== (element.textContent?.trim() || '')) {
+                    path.unshift(text);
+                  }
+                }
+                current = container.parentElement.parentElement;
+              } else {
+                break;
+              }
+            }
+            depth++;
+          }
+          
+          return path;
+        }
+
+        // Scan ALL navigation roots extensively
+        navRoots.forEach(root => {
+          // Get all clickable elements, including nested ones
+          const clickables = Array.from(root.querySelectorAll('a, button[onclick], [role="button"], .nav-link, .menu-item')) as HTMLElement[];
+          
+          clickables.forEach(el => {
+            const anchor = el as HTMLAnchorElement;
+            const href = anchor.href || anchor.getAttribute('data-href') || '#';
+            const text = (el.textContent || '').trim();
+            
+            if (!text || text.length < 1) return;
+            
+            const key = href + '|' + text;
+            if (seen.has(key)) return;
+            seen.add(key);
+            
+            // Build complete hierarchical path
+            const pathParts = buildCompletePath(el);
+            pathParts.push(text); // Add the final item
+            
+            const fullPath = pathParts.join(' > ');
+            
+            navPaths.push({ 
+              path: fullPath, 
+              text: text, 
+              href: href.startsWith('#') ? window.location.origin + href : href
+            });
+          });
+          
+          // Also scan for dropdown/submenu structures specifically
+          const dropdowns = Array.from(root.querySelectorAll('.dropdown, .submenu, [aria-haspopup], .has-children')) as HTMLElement[];
+          dropdowns.forEach(dropdown => {
+            const trigger = dropdown.querySelector('a, button, .dropdown-toggle');
+            const submenuItems = Array.from(dropdown.querySelectorAll('.dropdown-menu a, .submenu a, ul a')) as HTMLAnchorElement[];
+            
+            if (trigger && submenuItems.length > 0) {
+              const triggerText = trigger.textContent?.trim() || '';
+              submenuItems.forEach(subItem => {
+                const subText = subItem.textContent?.trim() || '';
+                const subHref = subItem.href || '#';
+                
+                if (subText && triggerText) {
+                  const key = subHref + '|' + subText;
+                  if (!seen.has(key)) {
+                    seen.add(key);
+                    navPaths.push({
+                      path: `${triggerText} > ${subText}`,
+                      text: subText,
+                      href: subHref.startsWith('#') ? window.location.origin + subHref : subHref
+                    });
+                  }
+                }
+              });
+            }
+          });
+        });
+
+        const allLinks: ExtractedLink[] = Array.from(document.querySelectorAll('a'))
+          .map(a => ({
+            text: (a.textContent || '').trim(),
+            href: (a as HTMLAnchorElement).href,
+            selector: a.tagName.toLowerCase() + (a.id ? `#${a.id}` : '') + (a.className ? `.${(a.className || '').replace(/\s+/g, '.')}` : '')
+          }))
+          .filter(l => l.href && l.text)
+          .slice(0, 500); // Increased limit
+
+        return { headings, navPaths, allLinks };
+      });
+    } catch {}
+    // Heurística inicial: si la meta incluye "iniciativ", intenta preparar submenús
+    if (/iniciativ/i.test(params.goal)) {
+      try { await page.hover('nav li:has(a), header nav li:has(a), .menu li:has(a)', { timeout: 2000 }); } catch {}
+    }
     for (let i = 0; i < params.maxSteps; i++) {
       if (params.screenshot) {
         const path = `/tmp/shot-${Date.now()}-${i}.png`;
@@ -181,13 +378,47 @@ async function runAgent(params: AgentRequest) {
         shots.push({ step: i, path });
       }
       const html = await page.content();
-      const prompt = `URL: ${params.url}\nGoal: ${params.goal}\nHTML head+body (truncated to 12k):\n${html.slice(0, 12000)}\nReturn one line: action:extract|click|type; selector:CSS; text?:string; notes:...`;
+      const prompt = `URL: ${params.url}\nGoal: ${params.goal}\nHTML head+body (truncated to 12k):\n${html.slice(0, 12000)}\nReturn one line: action:hover|click|type|extract|scroll|wait; selector:CSS; text?:string; notes: If submenu, use hover on parent before click.`;
       const plan = await callLLM(prompt);
       steps.push({ i, plan });
       const action = /action:([^;]+)/i.exec(plan)?.[1]?.trim() || 'extract';
-      const selector = /selector:([^;]+)/i.exec(plan)?.[1]?.trim() || 'main,article';
+      let selector = /selector:([^;]+)/i.exec(plan)?.[1]?.trim() || 'main,article';
       const text = /text:([^;]+)/i.exec(plan)?.[1]?.trim();
 
+      // Fallback inteligente para metas de "iniciativas" si el selector es genérico o vacío
+      const needsIniciativas = /iniciativ/i.test(params.goal);
+      const selectorLooksGeneric = selector === 'main,article' || selector.length < 3;
+      if (needsIniciativas && (action === 'click' || action === 'extract') && selectorLooksGeneric) {
+        // Intentar hover + click por texto y href
+        try {
+          await page.hover('nav li:has(a), header nav li:has(a), .menu li:has(a)', { timeout: 1500 });
+        } catch {}
+        const candidates = [
+          'a:has-text("Iniciativas de Ley")',
+          'a:has-text("Iniciativas")',
+          'a[href*="iniciativa"]',
+        ];
+        let clicked = false;
+        for (const c of candidates) {
+          try {
+            await page.click(c, { timeout: 2000 });
+            await page.waitForTimeout(1200);
+            selector = 'main,article,section';
+            clicked = true;
+            break;
+          } catch {}
+        }
+        if (clicked) {
+          steps.push({ i, plan: 'fallback:hover+click iniciativas' });
+          // Continuar a extracción en este mismo ciclo
+        }
+      }
+
+      if (action === 'hover') {
+        try { await page.hover(selector, { timeout: 5000 }); } catch {}
+        await page.waitForTimeout(800);
+        continue;
+      }
       if (action === 'click') {
         try { await page.click(selector, { timeout: 5000 }); } catch {}
         await page.waitForTimeout(1500);
@@ -209,7 +440,7 @@ async function runAgent(params: AgentRequest) {
             href: (a as HTMLAnchorElement).href,
             selector: a.tagName.toLowerCase() + (a.id ? `#${a.id}` : '') + (a.className ? `.${a.className.replace(/\s+/g, '.')}` : '')
           }))
-          .slice(0, 100);
+          .slice(0, 300);
         
         // Extract navigation structure
         const navElements = Array.from(document.querySelectorAll('nav, .nav, [role="navigation"], header ul, .menu'))
@@ -227,9 +458,44 @@ async function runAgent(params: AgentRequest) {
         
         return { text, links, navElements, searchElements };
       }, selector);
-      return { steps, shots, content };
+      return { steps, shots, content, scan };
     }
-    return { steps, shots, content: { text: '', links: [], navElements: [], searchElements: [] } };
+    // Mini-crawler: visitar hasta 3 enlaces internos relacionados al objetivo
+    try {
+      const goalTerms = extractGoalTerms(params.goal);
+      if (scan && goalTerms.length > 0) {
+        const startHost = new URL(params.url).host;
+        type Scored = { href: string; text: string; score: number };
+        const scored: Scored[] = [];
+        const consider = [...(scan.allLinks || [])];
+        consider.forEach(l => {
+          try {
+            const u = new URL(l.href);
+            if (u.host !== startHost) return; // solo interno
+            const haystack = `${(l.text||'').toLowerCase()} ${u.pathname.toLowerCase()}`;
+            const score = goalTerms.reduce((s, term) => s + (haystack.includes(term) ? 1 : 0), 0);
+            if (score > 0) scored.push({ href: u.toString(), text: l.text || '', score });
+          } catch {}
+        });
+        scored.sort((a,b) => b.score - a.score);
+        const unique = Array.from(new Map(scored.map(s => [s.href, s])).values()).slice(0, 3);
+        for (const cand of unique) {
+          try {
+            await page.goto(cand.href, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.waitForTimeout(500);
+            const found = await page.evaluate((terms: string[]) => {
+              const title = (document.querySelector('h1,h2')?.textContent || document.title || '').trim();
+              const body = (document.body?.innerText || '').toLowerCase();
+              const matched = terms.filter(t => body.includes(t));
+              return { title, matched };
+            }, goalTerms);
+            crawlFindings.push({ url: cand.href, title: found.title, matched: found.matched });
+          } catch {}
+        }
+      }
+    } catch {}
+
+    return { steps, shots, content: { text: '', links: [], navElements: [], searchElements: [] }, scan, crawlFindings };
   } finally {
     await page.close().catch(() => {});
     await browser.close().catch(() => {});
@@ -262,6 +528,11 @@ async function executePlan(input: { plan: Plan; screenshot?: boolean }) {
       }
       if (s.action === 'scroll') {
         await page.evaluate(() => window.scrollBy({ top: window.innerHeight, behavior: 'smooth' }));
+        await page.waitForTimeout(800);
+        continue;
+      }
+      if (s.action === 'hover' && s.selector) {
+        try { await page.hover(s.selector, { timeout: 5000 }); } catch {}
         await page.waitForTimeout(800);
         continue;
       }
@@ -315,7 +586,7 @@ async function executePlan(input: { plan: Plan; screenshot?: boolean }) {
   }
 }
 
-app.post('/scrape/agent', async (req, reply) => {
+app.post('/scrape/agent', async (req: any, reply: any) => {
   const parsed = AgentRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400).send({ error: 'invalid_body', details: parsed.error.flatten() });
@@ -327,7 +598,7 @@ app.post('/scrape/agent', async (req, reply) => {
 
 app.get('/health', async () => ({ ok: true }));
 
-app.post('/plan/build', async (req, reply) => {
+app.post('/plan/build', async (req: any, reply: any) => {
   const parsed = AgentRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400).send({ error: 'invalid_body', details: parsed.error.flatten() });
@@ -337,7 +608,7 @@ app.post('/plan/build', async (req, reply) => {
   reply.send(result);
 });
 
-app.post('/scrape/execute', async (req, reply) => {
+app.post('/scrape/execute', async (req: any, reply: any) => {
   const body: any = req.body;
   const safe = PlanSchema.safeParse(body?.plan);
   if (!safe.success) {
@@ -349,7 +620,7 @@ app.post('/scrape/execute', async (req, reply) => {
 });
 
 // Endpoint for Explorer functionality
-app.post('/explore/summarize', async (req, reply) => {
+app.post('/explore/summarize', async (req: any, reply: any) => {
   const parsed = AgentRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     reply.code(400).send({ error: 'invalid_body', details: parsed.error.flatten() });
@@ -365,7 +636,9 @@ app.post('/explore/summarize', async (req, reply) => {
       url: parsed.data.url,
       goal: parsed.data.goal,
       content: result.content,
-      steps: result.steps
+      steps: result.steps,
+      scan: (result as any).scan,
+      crawlFindings: (result as any).crawlFindings || []
     });
     
     reply.send({ summary, rawResult: result });
@@ -384,8 +657,10 @@ async function generateExplorerSummary(params: {
   goal: string;
   content: ExtractedContent;
   steps: any[];
+  scan?: PageScanResult | null;
+  crawlFindings?: CrawlFinding[];
 }): Promise<string> {
-  const { url, goal, content, steps } = params;
+  const { url, goal, content, steps, scan, crawlFindings = [] } = params;
   
   // Filter relevant links based on the goal
   const relevantLinks = content.links
@@ -410,7 +685,7 @@ async function generateExplorerSummary(params: {
   
   // Create navigation guidance
   const prompt = `
-Analiza esta página web y proporciona una guía DETALLADA y EJECUTABLE para automatización.
+Analiza la página web y genera una guía ejecutable para automatización.
 
 **URL**: ${url}
 **Objetivo del usuario**: ${goal}
@@ -420,6 +695,12 @@ ${content.text.slice(0, 2000)}
 
 **Enlaces relevantes encontrados**:
 ${relevantLinks.map(link => `- [${link.text}](${link.href})`).join('\n')}
+
+**Mapa de navegación detectado (máx 20)**:
+${(scan?.navPaths || []).slice(0, 20).map(p => `- ${p.path} → ${p.href}`).join('\n')}
+
+**Resultados del mini-crawler (máx 3)**:
+${crawlFindings.map(c => `- ${c.title || '[sin título]'} → ${c.url}`).join('\n') || '- [Sin hallazgos adicionales]'}
 
 **Todos los enlaces disponibles**:
 ${content.links.slice(0, 50).map(link => `- [${link.text}](${link.href}) | Selector: \`${link.selector}\``).join('\n')}
@@ -439,11 +720,23 @@ Responde en formato Markdown ESTRUCTURADO para automatización con estas seccion
 - Tipo de sitio y función principal
 - Estructura general de navegación
 
+## 🗺️ Mapa de Navegación Detectado (${(scan?.navPaths || []).length} rutas encontradas)
+${(scan?.navPaths || []).length > 0 ? 
+  (scan?.navPaths || []).slice(0, 30).map(p => `- ${p.path} → ${p.href}`).join('\n') :
+  '- No se detectaron rutas de navegación estructuradas'
+}
+
+## 🔍 Hallazgos del Mini-Crawler
+${crawlFindings.length > 0 ? 
+  crawlFindings.map(c => `- **${c.title || '[sin título]'}** → ${c.url}\n  Términos encontrados: ${c.matched.join(', ') || 'ninguno'}`).join('\n') :
+  '- No se exploraron páginas adicionales'
+}
+
 ## 🎯 Análisis del Objetivo: "${goal}"
 - ¿Se encontró contenido relacionado? (SÍ/NO)
 - Ubicación exacta del contenido buscado
 
-## 🗺️ Rutas de Navegación Automatizable
+## 🚀 Rutas de Navegación Automatizable
 ### Opción 1: Navegación Directa
 \`\`\`
 URL_DIRECTA: [URL exacta si existe]
@@ -461,7 +754,7 @@ PASO_3: [Acción final]
 ## 📋 Enlaces Específicos Ejecutables
 ${relevantLinks.length > 0 ? relevantLinks.map(link => `- **${link.text}**: [${link.href}](${link.href})`).join('\n') : '- No se encontraron enlaces específicos'}
 
-## 🔍 Selectores para Automatización
+## ⚙️ Selectores para Automatización
 \`\`\`css
 /* Selectores CSS identificados para extracción automática */
 MENU_PRINCIPAL: "[selector del menú principal]"
@@ -523,7 +816,7 @@ ${relevantLinks.length > 0
   }
 }
 
-app.listen({ port: PORT, host: '0.0.0.0' }).catch((err) => {
+app.listen({ port: PORT, host: '0.0.0.0' }).catch((err: any) => {
   app.log.error(err);
   process.exit(1);
 });

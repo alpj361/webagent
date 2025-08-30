@@ -302,3 +302,4 @@ Para alto tráfico, considera:
 - Múltiples instancias de WebAgent
 - Cache con Redis
 - Rate limiting
+
