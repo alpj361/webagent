@@ -10,6 +10,11 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'openrouter/auto';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
+// 🔧 Anti-bot services configuration
+const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '';
+const BRIGHTDATA_KEY = process.env.BRIGHTDATA_KEY || '';
+const PROXY_URL = process.env.PROXY_URL || '';
+
 const app = Fastify({ logger: true });
 app.register(cors, { origin: true });
 
@@ -85,6 +90,153 @@ function extractGoalTerms(goal: string): string[] {
     .split(/\s+/)
     .filter(t => t && t.length > 3 && !['necesito','buscar','busco','encontrar','quiero','ver','las','los','de','del','para','con','una','unos','unas'].includes(t))
     .slice(0, 6);
+}
+
+// 🤖 Human-like interaction simulation for anti-bot bypass
+async function simulateHumanBehavior(page: Page): Promise<void> {
+  console.log('🎭 Simulando comportamiento humano para bypass anti-bot...');
+  
+  try {
+    // 1. Random mouse movements
+    const movements = [
+      { x: 100, y: 100 },
+      { x: 300, y: 200 },
+      { x: 500, y: 150 },
+      { x: 200, y: 400 },
+      { x: 400, y: 300 }
+    ];
+    
+    for (const move of movements) {
+      await page.mouse.move(move.x, move.y);
+      await page.waitForTimeout(500 + Math.random() * 1000); // Random delay 500-1500ms
+    }
+    
+    // 2. Random scrolling behavior
+    const scrollSteps = 3 + Math.floor(Math.random() * 3); // 3-5 scroll steps
+    for (let i = 0; i < scrollSteps; i++) {
+      const scrollAmount = 200 + Math.random() * 400; // Random scroll 200-600px
+      await page.evaluate((amount: number) => {
+        window.scrollBy({ top: amount, behavior: 'smooth' });
+      }, scrollAmount);
+      await page.waitForTimeout(800 + Math.random() * 1200); // Random delay 800-2000ms
+    }
+    
+    // 3. Random clicks on safe elements (not forms or buttons)
+    const safeSelectors = [
+      'body', 'main', 'article', 'section', 
+      '.content', '.main-content', '.page-content'
+    ];
+    
+    for (const selector of safeSelectors) {
+      try {
+        const element = await page.$(selector);
+        if (element) {
+          const box = await element.boundingBox();
+          if (box) {
+            const x = box.x + Math.random() * box.width;
+            const y = box.y + Math.random() * box.height;
+            await page.mouse.click(x, y);
+            await page.waitForTimeout(1000 + Math.random() * 2000);
+          }
+        }
+      } catch {}
+    }
+    
+    // 4. Random keyboard activity (safe keys)
+    const safeKeys = ['Tab', 'ArrowDown', 'ArrowUp', 'Home', 'End'];
+    for (let i = 0; i < 2 + Math.floor(Math.random() * 3); i++) {
+      const key = safeKeys[Math.floor(Math.random() * safeKeys.length)];
+      await page.keyboard.press(key);
+      await page.waitForTimeout(300 + Math.random() * 700);
+    }
+    
+    // 5. Random viewport resizing (subtle)
+    const currentViewport = page.viewportSize();
+    if (currentViewport) {
+      const newWidth = currentViewport.width + Math.floor(Math.random() * 20 - 10); // ±10px
+      const newHeight = currentViewport.height + Math.floor(Math.random() * 20 - 10);
+      await page.setViewportSize({ width: newWidth, height: newHeight });
+      await page.waitForTimeout(1000);
+      await page.setViewportSize(currentViewport); // Restore original
+    }
+    
+    console.log('✅ Simulación de comportamiento humano completada');
+  } catch (error) {
+    console.log('⚠️ Error en simulación humana:', error);
+  }
+}
+
+// 🌐 Anti-bot service integration
+async function useAntiBotService(url: string): Promise<string | null> {
+  console.log('🔧 Intentando servicios anti-bot...');
+  
+  // Option 1: ScraperAPI
+  if (SCRAPERAPI_KEY) {
+    try {
+      console.log('📡 Usando ScraperAPI...');
+      const scraperApiUrl = `https://api.scraperapi.com/?api_key=${SCRAPERAPI_KEY}&url=${encodeURIComponent(url)}&render=true&country_code=us`;
+      
+      const { body } = await request(scraperApiUrl);
+      const html = await body.text();
+      
+      if (html && html.length > 1000 && !html.includes('incapsula') && !html.includes('cloudflare')) {
+        console.log('✅ ScraperAPI exitoso');
+        return html;
+      }
+    } catch (error) {
+      console.log('❌ ScraperAPI falló:', error);
+    }
+  }
+  
+  // Option 2: Bright Data
+  if (BRIGHTDATA_KEY) {
+    try {
+      console.log('📡 Usando Bright Data...');
+      const brightDataUrl = `https://api.brightdata.com/datasets/global-proxy/requests`;
+      
+      const { body } = await request(brightDataUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${BRIGHTDATA_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          url: url,
+          format: 'html',
+          country: 'US'
+        })
+      });
+      
+      const result = await body.json() as any;
+      if (result.html && result.html.length > 1000) {
+        console.log('✅ Bright Data exitoso');
+        return result.html;
+      }
+    } catch (error) {
+      console.log('❌ Bright Data falló:', error);
+    }
+  }
+  
+  // Option 3: Custom Proxy
+  if (PROXY_URL) {
+    try {
+      console.log('📡 Usando Proxy personalizado...');
+      const proxyUrl = `${PROXY_URL}?url=${encodeURIComponent(url)}`;
+      
+      const { body } = await request(proxyUrl);
+      const html = await body.text();
+      
+      if (html && html.length > 1000) {
+        console.log('✅ Proxy personalizado exitoso');
+        return html;
+      }
+    } catch (error) {
+      console.log('❌ Proxy personalizado falló:', error);
+    }
+  }
+  
+  console.log('❌ Todos los servicios anti-bot fallaron');
+  return null;
 }
 
 async function callLLM(prompt: string, systemPrompt?: string): Promise<string> {
@@ -195,7 +347,9 @@ async function runAgent(params: AgentRequest) {
     args: [
       '--no-sandbox',
       '--disable-gpu',
-      '--disable-dev-shm-usage'
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=VizDisplayCompositor'
     ]
   });
   const page: Page = await browser.newPage();
@@ -204,12 +358,100 @@ async function runAgent(params: AgentRequest) {
   let scan: PageScanResult | null = null;
   const crawlFindings: CrawlFinding[] = [];
   try {
-    await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    // 🎭 Configurar página para parecer más humana
+    await page.addInitScript(() => {
+      // Remover indicadores de automatización
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'permissions', { get: () => ({ query: () => Promise.resolve({ state: 'granted' }) }) });
+    });
+    
+    // Configurar headers realistas
+    await page.setExtraHTTPHeaders({
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Upgrade-Insecure-Requests': '1'
+    });
+    
+    // 🌐 Intentar servicios anti-bot primero
+    const antiBotHtml = await useAntiBotService(params.url);
+    if (antiBotHtml) {
+      console.log('✅ Usando HTML de servicio anti-bot');
+      await page.setContent(antiBotHtml);
+    } else {
+      console.log('🌐 Navegando directamente...');
+      await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    }
+    
+    // 🔒 Detección avanzada de anti-bot
+    const bodyText = (await page.textContent('body').catch(() => '')) || '';
+    const hasAntiBot = bodyText.length < 200 || 
+      bodyText.toLowerCase().includes('incapsula') || 
+      bodyText.toLowerCase().includes('cloudflare') ||
+      bodyText.toLowerCase().includes('checking your browser') ||
+      bodyText.toLowerCase().includes('please wait') ||
+      bodyText.toLowerCase().includes('ddos protection');
+    
+    if (hasAntiBot) {
+      console.log('🔒 Anti-bot detectado - aplicando estrategias avanzadas...');
+      
+      // 🎭 Estrategia 1: Simulación de comportamiento humano
+      await simulateHumanBehavior(page);
+      
+      // ⏱️ Estrategia 2: Espera más larga y progresiva
+      console.log('⏱️ Esperando resolución de challenge (30 segundos)...');
+      await page.waitForTimeout(30000);
+      
+      // 🔄 Estrategia 3: Recarga con simulación humana
+      const bodyText2 = (await page.textContent('body').catch(() => '')) || '';
+      if (bodyText2.length < 200) {
+        console.log('🔄 Recargando con simulación humana...');
+        await simulateHumanBehavior(page);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(5000);
+        
+        // 🎭 Más simulación después de recarga
+        await simulateHumanBehavior(page);
+      }
+      
+      // 🔄 Estrategia 4: Intentar navegación a subpáginas
+      const currentUrl = page.url();
+      const baseUrl = new URL(currentUrl).origin;
+      const subPages = [
+        `${baseUrl}/`,
+        `${baseUrl}/index.html`,
+        `${baseUrl}/home`,
+        `${baseUrl}/main`
+      ];
+      
+      for (const subPage of subPages) {
+        try {
+          console.log(`🔄 Intentando subpágina: ${subPage}`);
+          await page.goto(subPage, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await simulateHumanBehavior(page);
+          
+          const subBodyText = (await page.textContent('body').catch(() => '')) || '';
+          if (subBodyText.length > 500) {
+            console.log('✅ Subpágina exitosa');
+            break;
+          }
+        } catch {}
+      }
+    }
+    
     // Pre-scan: aggressively expand ALL menus and index complete structure
     try {
       // Step 1: Force hover on ALL potential menu triggers to reveal submenus
       const menuTriggers = await page.$$eval('nav li, header li, .menu li, .navbar li, [role="navigation"] li, .dropdown, .nav-item', 
-        elements => elements.map(el => ({
+        (elements: any[]) => elements.map((el: any) => ({
           selector: el.tagName.toLowerCase() + (el.id ? `#${el.id}` : '') + (el.className ? `.${el.className.replace(/\s+/g, '.')}` : ''),
           hasChildren: el.querySelector('ul, .dropdown-menu, .submenu') !== null,
           text: (el.textContent || '').trim().slice(0, 50)
@@ -597,6 +839,100 @@ app.post('/scrape/agent', async (req: any, reply: any) => {
 });
 
 app.get('/health', async () => ({ ok: true }));
+
+// 🔧 Endpoint específico para testing anti-bot
+app.post('/test-antibot', async (req: any, reply: any) => {
+  const { url } = req.body;
+  if (!url) {
+    reply.code(400).send({ error: 'url_required' });
+    return;
+  }
+  
+  try {
+    console.log(`🧪 Testing anti-bot capabilities for: ${url}`);
+    
+    const browser: Browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=VizDisplayCompositor'
+      ]
+    });
+    
+    const page: Page = await browser.newPage();
+    
+    try {
+      // Configurar página anti-detección
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      });
+      
+      await page.setExtraHTTPHeaders({
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8'
+      });
+      
+      // Intentar servicios anti-bot primero
+      const antiBotHtml = await useAntiBotService(url);
+      if (antiBotHtml) {
+        await page.setContent(antiBotHtml);
+      } else {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      }
+      
+      // Detectar anti-bot
+      const bodyText = (await page.textContent('body').catch(() => '')) || '';
+      const hasAntiBot = bodyText.length < 200 || 
+        bodyText.toLowerCase().includes('incapsula') || 
+        bodyText.toLowerCase().includes('cloudflare') ||
+        bodyText.toLowerCase().includes('checking your browser');
+      
+      if (hasAntiBot) {
+        console.log('🔒 Anti-bot detectado - aplicando bypass...');
+        await simulateHumanBehavior(page);
+        await page.waitForTimeout(30000);
+        
+        const bodyText2 = (await page.textContent('body').catch(() => '')) || '';
+        if (bodyText2.length < 200) {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
+          await simulateHumanBehavior(page);
+        }
+      }
+      
+      const finalHtml = await page.content();
+      const finalText = (await page.textContent('body').catch(() => '')) || '';
+      
+      reply.send({
+        success: finalText.length > 500,
+        html_length: finalHtml.length,
+        text_length: finalText.length,
+        has_antibot: hasAntiBot,
+        bypass_successful: finalText.length > 500,
+        content_preview: finalText.slice(0, 500),
+        services_available: {
+          scraperapi: !!SCRAPERAPI_KEY,
+          brightdata: !!BRIGHTDATA_KEY,
+          proxy: !!PROXY_URL
+        }
+      });
+      
+    } finally {
+      await page.close();
+      await browser.close();
+    }
+  } catch (error: unknown) {
+    reply.code(500).send({ 
+      error: 'antibot_test_failed', 
+      message: error instanceof Error ? error.message : 'Unknown error' 
+    });
+  }
+});
 
 app.post('/plan/build', async (req: any, reply: any) => {
   const parsed = AgentRequestSchema.safeParse(req.body);
