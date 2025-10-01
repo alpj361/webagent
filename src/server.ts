@@ -1,8 +1,9 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { chromium, Browser, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { z } from 'zod';
 import { request } from 'undici';
+import { promises as fs } from 'fs';
 
 const PORT = Number(process.env.PORT || 8787);
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
@@ -14,6 +15,131 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '';
 const BRIGHTDATA_KEY = process.env.BRIGHTDATA_KEY || '';
 const PROXY_URL = process.env.PROXY_URL || '';
+const ROTATING_PROXIES = process.env.ROTATING_PROXIES || '';
+const COOKIE_PATH = process.env.COOKIE_PATH || '';
+const COOKIE_JSON = process.env.COOKIE_JSON || '';
+
+type NetworkCookie = Parameters<BrowserContext['addCookies']>[0][number];
+
+let cachedCookies: NetworkCookie[] | null = null;
+
+function normalizeSameSite(value: any): NetworkCookie['sameSite'] | undefined {
+  if (!value) return undefined;
+  const normalized = String(value).toLowerCase();
+  if (normalized.includes('strict')) return 'Strict';
+  if (normalized.includes('lax')) return 'Lax';
+  if (normalized.includes('none')) return 'None';
+  return undefined;
+}
+
+function normalizeCookie(raw: any): NetworkCookie | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const name = raw.name ?? raw.key;
+  const value = raw.value ?? raw.val ?? raw.content;
+  if (!name || !value) return null;
+  const cookie: NetworkCookie = {
+    name: String(name),
+    value: String(value),
+    path: typeof raw.path === 'string' && raw.path ? raw.path : '/',
+  };
+  if (typeof raw.domain === 'string' && raw.domain) {
+    cookie.domain = raw.domain;
+  } else if (typeof raw.host === 'string' && raw.host) {
+    cookie.domain = raw.host;
+  }
+  if (typeof raw.url === 'string' && raw.url) {
+    cookie.url = raw.url;
+  }
+  if (typeof raw.httpOnly === 'boolean') {
+    cookie.httpOnly = raw.httpOnly;
+  } else if (typeof raw.http_only === 'boolean') {
+    cookie.httpOnly = raw.http_only;
+  }
+  if (typeof raw.secure === 'boolean') {
+    cookie.secure = raw.secure;
+  }
+  const sameSite = normalizeSameSite(raw.sameSite ?? raw.same_site);
+  if (sameSite) cookie.sameSite = sameSite;
+  if (typeof raw.expires === 'number') {
+    cookie.expires = raw.expires;
+  }
+  if (raw.expirationDate && typeof raw.expirationDate === 'number') {
+    cookie.expires = Math.round(raw.expirationDate);
+  }
+  if (!cookie.domain && cookie.url) {
+    try {
+      const u = new URL(cookie.url);
+      cookie.domain = u.hostname;
+    } catch {}
+  }
+  return cookie;
+}
+
+async function loadCookiesFromEnv(): Promise<NetworkCookie[]> {
+  if (cachedCookies) return cachedCookies;
+  const cookies: NetworkCookie[] = [];
+  try {
+    if (COOKIE_JSON) {
+      const parsed = JSON.parse(COOKIE_JSON);
+      if (Array.isArray(parsed)) {
+        for (const raw of parsed) {
+          const cookie = normalizeCookie(raw);
+          if (cookie) cookies.push(cookie);
+        }
+      }
+    } else if (COOKIE_PATH) {
+      const content = await fs.readFile(COOKIE_PATH, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        for (const raw of parsed) {
+          const cookie = normalizeCookie(raw);
+          if (cookie) cookies.push(cookie);
+        }
+      }
+    }
+  } catch (error) {
+    console.log('⚠️ No se pudieron cargar cookies:', error);
+  }
+  cachedCookies = cookies;
+  return cookies;
+}
+
+async function applyCookies(context: BrowserContext, targetUrl: string): Promise<void> {
+  const cookies = await loadCookiesFromEnv();
+  if (!cookies.length) return;
+  try {
+    const url = new URL(targetUrl);
+    const normalized = cookies.map(cookie => {
+      if (!cookie.domain && !cookie.url) {
+        return { ...cookie, domain: url.hostname };
+      }
+      return cookie;
+    });
+    await context.addCookies(normalized);
+    console.log('🍪 Cookies aplicadas desde configuración externa');
+  } catch (error) {
+    console.log('⚠️ Error aplicando cookies:', error);
+  }
+}
+
+function pickRotatingProxy(): { server: string; username?: string; password?: string } | undefined {
+  if (!ROTATING_PROXIES) return undefined;
+  const proxies = ROTATING_PROXIES.split(',').map(p => p.trim()).filter(Boolean);
+  if (!proxies.length) return undefined;
+  const chosen = proxies[Math.floor(Math.random() * proxies.length)];
+  try {
+    const proxyUrl = new URL(chosen);
+    const server = `${proxyUrl.protocol}//${proxyUrl.hostname}${proxyUrl.port ? `:${proxyUrl.port}` : ''}`;
+    const proxyConfig: { server: string; username?: string; password?: string } = { server };
+    if (proxyUrl.username) proxyConfig.username = decodeURIComponent(proxyUrl.username);
+    if (proxyUrl.password) proxyConfig.password = decodeURIComponent(proxyUrl.password);
+    console.log(`🛡️ Usando proxy rotativo: ${server}`);
+    return proxyConfig;
+  } catch (error) {
+    console.log('⚠️ Proxy inválido en ROTATING_PROXIES:', chosen, error);
+    return undefined;
+  }
+}
 
 const app = Fastify({ logger: true });
 app.register(cors, { origin: true });
@@ -287,11 +413,15 @@ async function callLLM(prompt: string, systemPrompt?: string): Promise<string> {
 }
 
 async function buildPlan(params: AgentRequest) {
+  const proxy = pickRotatingProxy();
   const browser: Browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    proxy
   });
-  const page: Page = await browser.newPage();
+  const context = await browser.newContext();
+  await applyCookies(context, params.url).catch(() => {});
+  const page: Page = await context.newPage();
   const shots: { step: number; path: string }[] = [];
   try {
     await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -337,11 +467,13 @@ async function buildPlan(params: AgentRequest) {
     return { plan, shots };
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }
 
 async function runAgent(params: AgentRequest) {
+  const proxy = pickRotatingProxy();
   const browser: Browser = await chromium.launch({
     headless: true,
     args: [
@@ -350,9 +482,12 @@ async function runAgent(params: AgentRequest) {
       '--disable-dev-shm-usage',
       '--disable-blink-features=AutomationControlled',
       '--disable-features=VizDisplayCompositor'
-    ]
+    ],
+    proxy
   });
-  const page: Page = await browser.newPage();
+  const context = await browser.newContext();
+  await applyCookies(context, params.url).catch(() => {});
+  const page: Page = await context.newPage();
   const steps: any[] = [];
   const shots: { step: number; path: string }[] = [];
   let scan: PageScanResult | null = null;
@@ -740,6 +875,7 @@ async function runAgent(params: AgentRequest) {
     return { steps, shots, content: { text: '', links: [], navElements: [], searchElements: [] }, scan, crawlFindings };
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }
@@ -747,11 +883,15 @@ async function runAgent(params: AgentRequest) {
 async function executePlan(input: { plan: Plan; screenshot?: boolean }) {
   const { plan } = input;
   const takeShots = input.screenshot ?? true;
+  const proxy = pickRotatingProxy();
   const browser: Browser = await chromium.launch({
     headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage']
+    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+    proxy
   });
-  const page: Page = await browser.newPage();
+  const context = await browser.newContext();
+  await applyCookies(context, plan.url).catch(() => {});
+  const page: Page = await context.newPage();
   const stepsRun: any[] = [];
   const shots: { step: number; path: string }[] = [];
   try {
@@ -824,6 +964,7 @@ async function executePlan(input: { plan: Plan; screenshot?: boolean }) {
     return { stepsRun, shots, content: { text: '', links: [], navElements: [], searchElements: [] } };
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }
