@@ -15,6 +15,11 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const SCRAPERAPI_KEY = process.env.SCRAPERAPI_KEY || '';
 const BRIGHTDATA_KEY = process.env.BRIGHTDATA_KEY || '';
 const PROXY_URL = process.env.PROXY_URL || '';
+
+// 🌐 Bright Data Proxy Configuration (same as ExtractorT)
+const NITTER_PROXY = process.env.NITTER_PROXY || process.env.HTTP_PROXY || '';
+const PROXY_USERNAME = process.env.PROXY_USERNAME || '';
+const PROXY_PASSWORD = process.env.PROXY_PASSWORD || '';
 const ROTATING_PROXIES = process.env.ROTATING_PROXIES || '';
 const COOKIE_PATH = process.env.COOKIE_PATH || '';
 const COOKIE_JSON = process.env.COOKIE_JSON || '';
@@ -290,6 +295,51 @@ async function simulateHumanBehavior(page: Page): Promise<void> {
   } catch (error) {
     console.log('⚠️ Error en simulación humana:', error);
   }
+}
+
+// 🌐 Bright Data Proxy Manager (same as ExtractorT)
+async function getProxyConfig(): Promise<any> {
+  if (!NITTER_PROXY) {
+    console.log('🚫 Proxy no configurado - usando conexión directa');
+    return null;
+  }
+  
+  try {
+    // Parse proxy URL
+    const proxyUrl = new URL(NITTER_PROXY);
+    const proxyConfig = {
+      server: `${proxyUrl.protocol}//${proxyUrl.host}`,
+      username: proxyUrl.username || PROXY_USERNAME,
+      password: proxyUrl.password || PROXY_PASSWORD
+    };
+    
+    console.log(`🔗 Usando proxy Bright Data: ${proxyConfig.server}`);
+    return proxyConfig;
+  } catch (error) {
+    console.log('❌ Error configurando proxy:', error);
+    return null;
+  }
+}
+
+// 🍪 Cookie Manager (same as ExtractorT)
+async function loadCookiesIfValid(context: any): Promise<boolean> {
+  if (!COOKIE_JSON) {
+    console.log('🚫 No hay cookies configuradas');
+    return false;
+  }
+  
+  try {
+    const cookies = JSON.parse(COOKIE_JSON);
+    if (Array.isArray(cookies) && cookies.length > 0) {
+      await context.addCookies(cookies);
+      console.log(`✅ Cargadas ${cookies.length} cookies`);
+      return true;
+    }
+  } catch (error) {
+    console.log('❌ Error cargando cookies:', error);
+  }
+  
+  return false;
 }
 
 // 🌐 Anti-bot service integration
