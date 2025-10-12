@@ -1,9 +1,14 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { chromium as playwrightChromium } from 'playwright-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { z } from 'zod';
 import { request } from 'undici';
 import { promises as fs } from 'fs';
+
+// 🛡️ Enable stealth mode for anti-bot evasion
+playwrightChromium.use(StealthPlugin());
 
 const PORT = Number(process.env.PORT || 8787);
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
@@ -144,6 +149,117 @@ function pickRotatingProxy(): { server: string; username?: string; password?: st
     console.log('⚠️ Proxy inválido en ROTATING_PROXIES:', chosen, error);
     return undefined;
   }
+}
+
+/**
+ * 🛡️ Launch browser with anti-bot stealth configuration
+ * Uses playwright-extra with stealth plugin for maximum evasion
+ */
+async function launchStealthBrowser(useProxy: boolean = true): Promise<Browser> {
+  const proxy = useProxy ? pickRotatingProxy() : undefined;
+
+  const browser: Browser = await playwrightChromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor',
+      '--disable-web-security',
+      '--disable-setuid-sandbox',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-breakpad',
+      '--disable-client-side-phishing-detection',
+      '--disable-component-update',
+      '--disable-default-apps',
+      '--disable-domain-reliability',
+      '--disable-extensions',
+      '--disable-features=AudioServiceOutOfProcess',
+      '--disable-hang-monitor',
+      '--disable-ipc-flooding-protection',
+      '--disable-notifications',
+      '--disable-offer-store-unmasked-wallet-cards',
+      '--disable-popup-blocking',
+      '--disable-print-preview',
+      '--disable-prompt-on-repost',
+      '--disable-renderer-backgrounding',
+      '--disable-speech-api',
+      '--disable-sync',
+      '--hide-scrollbars',
+      '--ignore-certificate-errors',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--no-pings',
+      '--password-store=basic',
+      '--use-mock-keychain',
+      '--single-process'
+    ],
+    proxy
+  });
+
+  console.log('🛡️ Stealth browser launched with anti-bot evasion');
+  return browser;
+}
+
+/**
+ * 🌐 Create enhanced browser context with realistic fingerprint
+ */
+async function createStealthContext(browser: Browser, targetUrl: string): Promise<BrowserContext> {
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 },
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    locale: 'es-GT',
+    timezoneId: 'America/Guatemala',
+    colorScheme: 'light',
+    deviceScaleFactor: 2,
+    hasTouch: false,
+    isMobile: false,
+    javaScriptEnabled: true,
+    permissions: []
+  });
+
+  // Apply cookies if configured
+  await applyCookies(context, targetUrl).catch(() => {});
+
+  console.log('🌐 Stealth context created with realistic fingerprint');
+  return context;
+}
+
+/**
+ * 🕐 Navigate to URL with anti-bot challenge handling
+ * Waits for anti-bot challenges (Incapsula, Cloudflare, etc) to resolve
+ */
+async function navigateWithChallengeHandling(page: Page, url: string, timeout: number = 60000): Promise<void> {
+  console.log(`🔗 Navigating to: ${url}`);
+
+  await page.goto(url, {
+    waitUntil: 'domcontentloaded',
+    timeout
+  });
+
+  // Wait for network to be idle (anti-bot scripts may load)
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {
+    console.log('⚠️ Network idle timeout, proceeding anyway');
+  });
+
+  // Additional delay for JavaScript execution (anti-bot challenges)
+  await page.waitForTimeout(3000);
+
+  // Check if we're still on a challenge page
+  const bodyText = await page.textContent('body').catch(() => '');
+  if (bodyText && bodyText.length < 100) {
+    console.log('⚠️ Possible challenge page detected, waiting additional 5s');
+    await page.waitForTimeout(5000);
+  }
+
+  console.log('✅ Navigation complete with challenge handling');
 }
 
 const app = Fastify({ logger: true });
@@ -415,8 +531,129 @@ async function useAntiBotService(url: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * 🧹 Sanitize CSS selector by removing extra quotes and validating syntax
+ */
+function sanitizeSelector(selector: string): string {
+  if (!selector) return 'main,article';
+
+  // Remove leading/trailing quotes (single or double)
+  let cleaned = selector.trim().replace(/^['"]|['"]$/g, '');
+
+  // Remove any remaining quotes that wrap the entire selector
+  if (cleaned.startsWith("'") && cleaned.endsWith("'")) {
+    cleaned = cleaned.slice(1, -1);
+  }
+  if (cleaned.startsWith('"') && cleaned.endsWith('"')) {
+    cleaned = cleaned.slice(1, -1);
+  }
+
+  // Basic validation: selector should not be empty after cleaning
+  if (!cleaned || cleaned.length < 1) {
+    return 'main,article';
+  }
+
+  return cleaned;
+}
+
+/**
+ * 📊 Extract structured table data from page
+ */
+async function extractTableData(page: Page, selector: string): Promise<any[]> {
+  try {
+    const tableData = await page.evaluate((sel: string) => {
+      // Find the table
+      let tableElement: HTMLTableElement | null = null;
+
+      // Try to find table directly
+      if (sel.includes('table')) {
+        const tables = Array.from(document.querySelectorAll('table'));
+
+        // Priority 1: Table with specific classes or data content
+        tableElement = tables.find(t => {
+          const classes = Array.from(t.classList).join(' ');
+          const hasDataClass = classes.includes('hover') || classes.includes('striped') || classes.includes('iniciativas') || classes.includes('table-hover');
+          const rowCount = t.querySelectorAll('tbody tr, tr').length;
+
+          // Must have more than 3 rows (not just UI elements)
+          return hasDataClass && rowCount > 3;
+        }) as HTMLTableElement;
+
+        // Priority 2: Largest table with most rows
+        if (!tableElement) {
+          tableElement = tables.sort((a, b) => {
+            const aRows = a.querySelectorAll('tbody tr, tr').length;
+            const bRows = b.querySelectorAll('tbody tr, tr').length;
+            return bRows - aRows;
+          })[0] as HTMLTableElement;
+        }
+      } else {
+        // Fallback: find largest table on page
+        const tables = Array.from(document.querySelectorAll('table'));
+        tableElement = tables.sort((a, b) => {
+          const aRows = a.querySelectorAll('tbody tr, tr').length;
+          const bRows = b.querySelectorAll('tbody tr, tr').length;
+          return bRows - aRows;
+        })[0] as HTMLTableElement;
+      }
+
+      if (!tableElement) return [];
+
+      // Extract headers
+      const headers: string[] = [];
+      const headerCells = tableElement.querySelectorAll('thead th, thead td, tr:first-child th');
+      headerCells.forEach(cell => {
+        const text = cell.textContent?.trim() || '';
+        if (text) headers.push(text);
+      });
+
+      // If no headers found, create generic ones
+      const hasHeaders = headers.length > 0;
+
+      // Extract rows
+      const rows: any[] = [];
+      const bodyRows = tableElement.querySelectorAll('tbody tr, tr');
+
+      bodyRows.forEach((row, rowIndex) => {
+        // Skip header row if no thead
+        if (!hasHeaders && rowIndex === 0 && row.querySelector('th')) return;
+
+        const cells = row.querySelectorAll('td, th');
+        if (cells.length === 0) return;
+
+        const rowData: any = {};
+        cells.forEach((cell, cellIndex) => {
+          const text = cell.textContent?.trim() || '';
+          const columnName = hasHeaders && headers[cellIndex]
+            ? headers[cellIndex]
+            : `column_${cellIndex}`;
+
+          rowData[columnName] = text;
+
+          // Extract links in cells
+          const link = cell.querySelector('a');
+          if (link) {
+            rowData[`${columnName}_link`] = (link as HTMLAnchorElement).href;
+          }
+        });
+
+        if (Object.keys(rowData).length > 0) {
+          rows.push(rowData);
+        }
+      });
+
+      return rows;
+    }, selector);
+
+    return tableData;
+  } catch (error) {
+    console.error('❌ Table extraction error:', error);
+    return [];
+  }
+}
+
 async function callLLM(prompt: string, systemPrompt?: string): Promise<string> {
-  const defaultSystemPrompt = 'You are a web navigation and scraping planner. Respond with concise actions like action:hover|click|extract|type|scroll|wait; selector:CSS; text?:string';
+  const defaultSystemPrompt = 'You are a web navigation and scraping planner. Respond with concise actions like action:hover|click|extract|type|scroll|wait; selector:CSS; text?:string. IMPORTANT: Return selectors WITHOUT quotes. Example: table tbody tr NOT "table tbody tr"';
   const system = systemPrompt || defaultSystemPrompt;
   
   // OpenRouter
@@ -463,18 +700,12 @@ async function callLLM(prompt: string, systemPrompt?: string): Promise<string> {
 }
 
 async function buildPlan(params: AgentRequest) {
-  const proxy = pickRotatingProxy();
-  const browser: Browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    proxy
-  });
-  const context = await browser.newContext();
-  await applyCookies(context, params.url).catch(() => {});
+  const browser: Browser = await launchStealthBrowser();
+  const context = await createStealthContext(browser, params.url);
   const page: Page = await context.newPage();
   const shots: { step: number; path: string }[] = [];
   try {
-    await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await navigateWithChallengeHandling(page, params.url);
     if (params.screenshot) {
       const path = `/tmp/plan-${Date.now()}-0.png`;
       await page.screenshot({ path, fullPage: true });
@@ -523,20 +754,8 @@ async function buildPlan(params: AgentRequest) {
 }
 
 async function runAgent(params: AgentRequest) {
-  const proxy = pickRotatingProxy();
-  const browser: Browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-features=VizDisplayCompositor'
-    ],
-    proxy
-  });
-  const context = await browser.newContext();
-  await applyCookies(context, params.url).catch(() => {});
+  const browser: Browser = await launchStealthBrowser();
+  const context = await createStealthContext(browser, params.url);
   const page: Page = await context.newPage();
   const steps: any[] = [];
   const shots: { step: number; path: string }[] = [];
@@ -573,7 +792,7 @@ async function runAgent(params: AgentRequest) {
       await page.setContent(antiBotHtml);
     } else {
       console.log('🌐 Navegando directamente...');
-      await page.goto(params.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await navigateWithChallengeHandling(page, params.url);
     }
     
     // 🔒 Detección avanzada de anti-bot
@@ -805,11 +1024,12 @@ async function runAgent(params: AgentRequest) {
         shots.push({ step: i, path });
       }
       const html = await page.content();
-      const prompt = `URL: ${params.url}\nGoal: ${params.goal}\nHTML head+body (truncated to 12k):\n${html.slice(0, 12000)}\nReturn one line: action:hover|click|type|extract|scroll|wait; selector:CSS; text?:string; notes: If submenu, use hover on parent before click.`;
+      const prompt = `URL: ${params.url}\nGoal: ${params.goal}\nHTML head+body (truncated to 12k):\n${html.slice(0, 12000)}\nReturn one line: action:hover|click|type|extract|scroll|wait; selector:CSS; text?:string; notes: If submenu, use hover on parent before click. IMPORTANT: Return selectors WITHOUT quotes.`;
       const plan = await callLLM(prompt);
       steps.push({ i, plan });
       const action = /action:([^;]+)/i.exec(plan)?.[1]?.trim() || 'extract';
-      let selector = /selector:([^;]+)/i.exec(plan)?.[1]?.trim() || 'main,article';
+      let selectorRaw = /selector:([^;]+)/i.exec(plan)?.[1]?.trim() || 'main,article';
+      let selector = sanitizeSelector(selectorRaw); // 🧹 Clean selector
       const text = /text:([^;]+)/i.exec(plan)?.[1]?.trim();
 
       // Fallback inteligente para metas de "iniciativas" si el selector es genérico o vacío
@@ -857,7 +1077,107 @@ async function runAgent(params: AgentRequest) {
         await page.waitForTimeout(1500);
         continue;
       }
-      // extract
+
+      // 📊 Table extraction with wait logic
+      const isTableExtraction = selector.includes('table') || selector.includes('tbody') || selector.includes('tr') || /table|extract.*data|extract.*row|iniciativ/i.test(params.goal);
+
+      if (isTableExtraction) {
+        console.log('📊 Detectada extracción de tabla, esperando carga dinámica...');
+
+        // Wait for table to appear
+        try {
+          await page.waitForSelector('table', { timeout: 10000 });
+          console.log('✅ Tabla encontrada');
+        } catch (e) {
+          console.log('⚠️ No se encontró tabla, continuando...');
+        }
+
+        // Wait for table rows with class hints
+        try {
+          await page.waitForSelector('table.table-hover tbody tr, table tbody tr:nth-child(3), table tr', { timeout: 15000 });
+          console.log('✅ Filas de tabla encontradas');
+        } catch (e) {
+          console.log('⚠️ No se encontraron filas con selector específico');
+        }
+
+        // Extra buffer for JavaScript/AJAX data population
+        await page.waitForTimeout(5000);
+        console.log('⏱️ Esperado 5s para carga inicial');
+
+        // Wait for actual data content (not just UI elements)
+        let dataLoaded = false;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const hasData = await page.evaluate(() => {
+            const tables = Array.from(document.querySelectorAll('table'));
+            const dataTable = tables.find(t => {
+              const rows = t.querySelectorAll('tbody tr, tr');
+              return rows.length > 5; // Has significant rows
+            });
+
+            if (!dataTable) return false;
+
+            // Check if rows have meaningful content (not just "×" or "buscar")
+            const firstRow = dataTable.querySelector('tbody tr td, tr td');
+            const text = firstRow?.textContent?.trim() || '';
+            const hasMeaningfulContent = text.length > 10 && !text.includes('buscar') && text !== '×';
+
+            return hasMeaningfulContent;
+          });
+
+          if (hasData) {
+            dataLoaded = true;
+            console.log(`✅ Datos de tabla cargados (intento ${attempt + 1})`);
+            break;
+          }
+
+          console.log(`⏳ Esperando datos... intento ${attempt + 1}/10`);
+          await page.waitForTimeout(2000);
+        }
+
+        if (!dataLoaded) {
+          console.log('⚠️ Los datos de la tabla no se cargaron completamente');
+        }
+
+        // Debug: Log all tables on page
+        const tableInfo = await page.evaluate(() => {
+          const tables = Array.from(document.querySelectorAll('table'));
+          return tables.map((t, idx) => ({
+            index: idx,
+            classes: Array.from(t.classList).join(' '),
+            rowCount: t.querySelectorAll('tbody tr, tr').length,
+            firstCellText: t.querySelector('td, th')?.textContent?.trim().slice(0, 50) || ''
+          }));
+        });
+        console.log('📊 Tables found:', JSON.stringify(tableInfo, null, 2));
+
+        // Extract structured table data
+        const tableData = await extractTableData(page, selector);
+
+        if (tableData && tableData.length > 0) {
+          console.log(`✅ Extraídas ${tableData.length} filas de tabla`);
+
+          // Limit to requested number if goal specifies
+          const limitMatch = /extract\s+(\d+)/i.exec(params.goal);
+          const limit = limitMatch ? parseInt(limitMatch[1], 10) : tableData.length;
+          const limitedData = tableData.slice(0, limit);
+
+          // Return structured data directly
+          return {
+            steps,
+            shots,
+            content: {
+              text: JSON.stringify(limitedData, null, 2),
+              links: [],
+              navElements: [],
+              searchElements: []
+            },
+            scan,
+            tableData: limitedData // Add structured data
+          };
+        }
+      }
+
+      // extract (generic)
       const content: ExtractedContent = await page.evaluate((sel: string): ExtractedContent => {
         const nodes = Array.from(document.querySelectorAll(sel));
         const text = nodes.map(n => n.textContent?.trim()).filter(Boolean).join('\n').slice(0, 4000);
@@ -933,19 +1253,13 @@ async function runAgent(params: AgentRequest) {
 async function executePlan(input: { plan: Plan; screenshot?: boolean }) {
   const { plan } = input;
   const takeShots = input.screenshot ?? true;
-  const proxy = pickRotatingProxy();
-  const browser: Browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-    proxy
-  });
-  const context = await browser.newContext();
-  await applyCookies(context, plan.url).catch(() => {});
+  const browser: Browser = await launchStealthBrowser();
+  const context = await createStealthContext(browser, plan.url);
   const page: Page = await context.newPage();
   const stepsRun: any[] = [];
   const shots: { step: number; path: string }[] = [];
   try {
-    await page.goto(plan.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await navigateWithChallengeHandling(page, plan.url);
     for (let i = 0; i < plan.steps.length; i++) {
       const s = plan.steps[i];
       if (takeShots) {
@@ -1041,19 +1355,10 @@ app.post('/test-antibot', async (req: any, reply: any) => {
   
   try {
     console.log(`🧪 Testing anti-bot capabilities for: ${url}`);
-    
-    const browser: Browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=VizDisplayCompositor'
-      ]
-    });
-    
-    const page: Page = await browser.newPage();
+
+    const browser: Browser = await launchStealthBrowser(false); // No proxy for testing
+    const context = await createStealthContext(browser, url);
+    const page: Page = await context.newPage();
     
     try {
       // Configurar página anti-detección

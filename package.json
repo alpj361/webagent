@@ -10,9 +10,11 @@
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
-    "fastify": "^4.28.1",
     "@fastify/cors": "^8.4.2",
+    "fastify": "^4.28.1",
     "playwright": "^1.55.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "undici": "^6.19.8",
     "zod": "^3.23.8"
   },
