@@ -557,6 +557,257 @@ function sanitizeSelector(selector: string): string {
 }
 
 /**
+ * 🧠 Smart field name detection based on content patterns
+ */
+function detectFieldName(text: string, index: number): string {
+  const lowerText = text.toLowerCase();
+  const numericPattern = /^\d+$/;
+  const datePattern = /\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4}|\d{1,2}\s+de\s+\w+/i;
+  const urlPattern = /^https?:\/\//i;
+
+  // Numeric IDs
+  if (numericPattern.test(text.trim()) && text.length < 10) {
+    return 'numero';
+  }
+
+  // Dates
+  if (datePattern.test(text)) {
+    return 'fecha';
+  }
+
+  // URLs
+  if (urlPattern.test(text)) {
+    return 'url';
+  }
+
+  // Status keywords
+  if (lowerText.includes('pendiente') || lowerText.includes('aprobado') ||
+      lowerText.includes('rechazado') || lowerText.includes('en comisión') ||
+      lowerText.includes('archivado') || lowerText.includes('activo')) {
+    return 'estado';
+  }
+
+  // Long text = title or description
+  if (text.length > 50) {
+    return index === 0 ? 'descripcion' : `descripcion_${index}`;
+  }
+
+  if (text.length > 15) {
+    return index === 0 ? 'titulo' : `campo_${index}`;
+  }
+
+  // Short text
+  return `campo_${index}`;
+}
+
+/**
+ * 🎴 Extract structured data from card-based layouts
+ */
+async function extractStructuredCards(page: Page, selector: string): Promise<any[]> {
+  try {
+    const cardData = await page.evaluate((sel: string) => {
+      // Find card containers
+      const cardSelectors = [
+        '.card', '.item', '.list-item', '.entry',
+        'article', '[class*="card"]', '[class*="item"]',
+        '.iniciativa', '.resultado', '.post'
+      ];
+
+      let cards: Element[] = [];
+
+      // Try each card selector
+      for (const cardSel of cardSelectors) {
+        const foundCards = Array.from(document.querySelectorAll(cardSel));
+        if (foundCards.length > 0) {
+          cards = foundCards;
+          console.log(`📦 Found ${cards.length} cards with selector: ${cardSel}`);
+          break;
+        }
+      }
+
+      // If no specific cards found, try finding repeated structures
+      if (cards.length === 0) {
+        // Look for divs with similar classes that appear multiple times
+        const allDivs = Array.from(document.querySelectorAll('div[class]'));
+        const classCount: Record<string, Element[]> = {};
+
+        allDivs.forEach(div => {
+          const className = div.className.split(' ')[0];
+          if (className && className.length > 3) {
+            if (!classCount[className]) classCount[className] = [];
+            classCount[className].push(div);
+          }
+        });
+
+        // Find class with most repetitions (likely data items)
+        const mostCommon = Object.entries(classCount)
+          .filter(([_, elements]) => elements.length >= 3)
+          .sort((a, b) => b[1].length - a[1].length)[0];
+
+        if (mostCommon) {
+          cards = mostCommon[1];
+          console.log(`📦 Found ${cards.length} repeated elements with class: ${mostCommon[0]}`);
+        }
+      }
+
+      if (cards.length === 0) return [];
+
+      // Extract data from each card
+      const results: any[] = [];
+
+      cards.forEach((card, cardIndex) => {
+        const cardData: any = { _index: cardIndex + 1 };
+
+        // Extract all text elements with their structure
+        const textElements = Array.from(card.querySelectorAll('h1, h2, h3, h4, h5, h6, p, span, div, td, th, strong, em, a'));
+        const seenTexts = new Set<string>();
+        let fieldIndex = 0;
+
+        textElements.forEach((el) => {
+          const text = el.textContent?.trim() || '';
+
+          // Skip empty, duplicates, or very short texts
+          if (!text || text.length < 2 || seenTexts.has(text)) return;
+          if (text === '×' || text === 'buscar') return;
+
+          seenTexts.add(text);
+
+          // Detect field name based on content
+          const fieldName = fieldIndex === 0 ? 'titulo' :
+                          text.match(/^\d+$/) ? 'numero' :
+                          text.match(/\d{4}-\d{2}-\d{2}/) ? 'fecha' :
+                          text.toLowerCase().includes('estado') ||
+                          text.toLowerCase().includes('pendiente') ||
+                          text.toLowerCase().includes('aprobado') ? 'estado' :
+                          text.length > 50 ? 'descripcion' :
+                          `campo_${fieldIndex}`;
+
+          cardData[fieldName] = text;
+
+          // Extract href if it's a link
+          if (el.tagName === 'A') {
+            const href = (el as HTMLAnchorElement).href;
+            if (href && !href.includes('javascript:')) {
+              cardData[`${fieldName}_link`] = href;
+            }
+          }
+
+          fieldIndex++;
+        });
+
+        // Extract all links in the card
+        const links = Array.from(card.querySelectorAll('a'));
+        links.forEach((link, linkIndex) => {
+          const href = (link as HTMLAnchorElement).href;
+          const text = link.textContent?.trim() || '';
+
+          if (href && !href.includes('javascript:') && !href.includes('void(0)')) {
+            if (text.toLowerCase().includes('detalle') || text.toLowerCase().includes('ver')) {
+              cardData['detalle_link'] = href;
+            } else if (text.toLowerCase().includes('descargar') || text.toLowerCase().includes('pdf')) {
+              cardData['pdf_link'] = href;
+            } else if (text.toLowerCase().includes('download')) {
+              cardData['download_link'] = href;
+            } else if (!cardData[`link_${linkIndex}`]) {
+              cardData[`link_${linkIndex}`] = href;
+            }
+          }
+        });
+
+        // Only add if we extracted meaningful data
+        if (Object.keys(cardData).length > 2) {
+          results.push(cardData);
+        }
+      });
+
+      return results;
+    }, selector);
+
+    return cardData;
+  } catch (error) {
+    console.error('❌ Card extraction error:', error);
+    return [];
+  }
+}
+
+/**
+ * 📋 Extract structured data from list-based layouts
+ */
+async function extractListItems(page: Page, selector: string): Promise<any[]> {
+  try {
+    const listData = await page.evaluate((sel: string) => {
+      // Find list containers
+      const listSelectors = ['ul', 'ol', 'dl', '[role="list"]', '.list', '.items'];
+
+      let listItems: Element[] = [];
+
+      for (const listSel of listSelectors) {
+        const list = document.querySelector(listSel);
+        if (list) {
+          listItems = Array.from(list.querySelectorAll('li, dt, article, .list-item'));
+          if (listItems.length > 0) {
+            console.log(`📋 Found ${listItems.length} list items in: ${listSel}`);
+            break;
+          }
+        }
+      }
+
+      if (listItems.length === 0) return [];
+
+      // Extract data from each list item
+      const results: any[] = [];
+
+      listItems.forEach((item, itemIndex) => {
+        const itemData: any = { _index: itemIndex + 1 };
+
+        // Extract text content
+        const texts = Array.from(item.querySelectorAll('h1, h2, h3, h4, h5, p, span, strong, a'));
+
+        texts.forEach((el, textIndex) => {
+          const text = el.textContent?.trim() || '';
+          if (!text || text.length < 2) return;
+
+          const fieldName = textIndex === 0 ? 'titulo' :
+                          text.match(/^\d+$/) ? 'numero' :
+                          text.match(/\d{4}-\d{2}-\d{2}/) ? 'fecha' :
+                          `campo_${textIndex}`;
+
+          itemData[fieldName] = text;
+
+          // Extract links
+          if (el.tagName === 'A') {
+            const href = (el as HTMLAnchorElement).href;
+            if (href) {
+              itemData[`${fieldName}_link`] = href;
+            }
+          }
+        });
+
+        // Extract all links
+        const links = Array.from(item.querySelectorAll('a'));
+        links.forEach((link, linkIndex) => {
+          const href = (link as HTMLAnchorElement).href;
+          if (href && !href.includes('javascript:')) {
+            itemData[`link_${linkIndex}`] = href;
+          }
+        });
+
+        if (Object.keys(itemData).length > 1) {
+          results.push(itemData);
+        }
+      });
+
+      return results;
+    }, selector);
+
+    return listData;
+  } catch (error) {
+    console.error('❌ List extraction error:', error);
+    return [];
+  }
+}
+
+/**
  * 📊 Extract structured table data from page
  */
 async function extractTableData(page: Page, selector: string): Promise<any[]> {
@@ -1078,11 +1329,14 @@ async function runAgent(params: AgentRequest) {
         continue;
       }
 
-      // 📊 Table extraction with wait logic
-      const isTableExtraction = selector.includes('table') || selector.includes('tbody') || selector.includes('tr') || /table|extract.*data|extract.*row|iniciativ/i.test(params.goal);
+      // 📊 Structured data extraction with wait logic (tables, cards, lists)
+      const isStructuredExtraction =
+        selector.includes('table') || selector.includes('tbody') || selector.includes('tr') ||
+        selector.includes('card') || selector.includes('item') || selector.includes('list') ||
+        /table|extract.*data|extract.*row|iniciativ|card|list|item/i.test(params.goal);
 
-      if (isTableExtraction) {
-        console.log('📊 Detectada extracción de tabla, esperando carga dinámica...');
+      if (isStructuredExtraction) {
+        console.log('📊 Detectada extracción de datos estructurados, esperando carga dinámica...');
 
         // Wait for table to appear
         try {
@@ -1150,16 +1404,74 @@ async function runAgent(params: AgentRequest) {
         });
         console.log('📊 Tables found:', JSON.stringify(tableInfo, null, 2));
 
-        // Extract structured table data
-        const tableData = await extractTableData(page, selector);
+        // 🔄 Unified structured extraction: Try table → cards → lists
+        let structuredData: any[] = [];
+        let extractionType = 'none';
+        let fieldsDetected: string[] = [];
 
-        if (tableData && tableData.length > 0) {
-          console.log(`✅ Extraídas ${tableData.length} filas de tabla`);
+        // Try 1: Table extraction
+        console.log('📊 Trying table extraction...');
+        structuredData = await extractTableData(page, selector);
+
+        // Filter out tables with only UI elements (×, buscar, etc.)
+        if (structuredData && structuredData.length > 0) {
+          const meaningfulData = structuredData.filter(row => {
+            const values = Object.values(row).join(' ');
+            // Skip rows that only contain UI elements
+            return values.length > 10 &&
+                   !values.includes('×') &&
+                   !values.includes('buscar') &&
+                   values.trim().length > 0;
+          });
+
+          if (meaningfulData.length > 0) {
+            structuredData = meaningfulData;
+            extractionType = 'table';
+            console.log(`✅ Extraídas ${structuredData.length} filas de tabla (${structuredData.length} significativas)`);
+          } else {
+            console.log(`⚠️ Tabla encontrada pero sin datos significativos`);
+            structuredData = [];
+          }
+        }
+
+        // Try 2: Card extraction (if no table data)
+        if (structuredData.length === 0) {
+          console.log('🎴 Trying card-based extraction...');
+          structuredData = await extractStructuredCards(page, selector);
+          if (structuredData && structuredData.length > 0) {
+            extractionType = 'cards';
+            console.log(`✅ Extraídas ${structuredData.length} cards`);
+          }
+        }
+
+        // Try 3: List extraction (if no cards)
+        if (structuredData.length === 0) {
+          console.log('📋 Trying list-based extraction...');
+          structuredData = await extractListItems(page, selector);
+          if (structuredData && structuredData.length > 0) {
+            extractionType = 'list';
+            console.log(`✅ Extraídos ${structuredData.length} list items`);
+          }
+        }
+
+        // If we got structured data, process and return
+        if (structuredData && structuredData.length > 0) {
+          // Detect fields from first item
+          if (structuredData[0]) {
+            fieldsDetected = Object.keys(structuredData[0]).filter(k => !k.startsWith('_'));
+          }
 
           // Limit to requested number if goal specifies
           const limitMatch = /extract\s+(\d+)/i.exec(params.goal);
-          const limit = limitMatch ? parseInt(limitMatch[1], 10) : tableData.length;
-          const limitedData = tableData.slice(0, limit);
+          const limit = limitMatch ? parseInt(limitMatch[1], 10) : structuredData.length;
+          const limitedData = structuredData.slice(0, limit);
+
+          console.log(`📊 Extraction summary:`, {
+            type: extractionType,
+            total_items: structuredData.length,
+            returned_items: limitedData.length,
+            fields: fieldsDetected.slice(0, 5)
+          });
 
           // Return structured data directly
           return {
@@ -1172,8 +1484,13 @@ async function runAgent(params: AgentRequest) {
               searchElements: []
             },
             scan,
-            tableData: limitedData // Add structured data
+            tableData: limitedData, // Unified structured data
+            extractionType,
+            fieldsDetected,
+            confidence: extractionType === 'table' ? 0.9 : 0.85
           };
+        } else {
+          console.log('⚠️ No se pudo extraer datos estructurados, continuando con extracción genérica');
         }
       }
 
